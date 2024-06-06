@@ -1,10 +1,9 @@
 from langchain_community.document_loaders import PyPDFLoader
 from langchain_text_splitters import RecursiveCharacterTextSplitter
 from langchain_community.embeddings import BedrockEmbeddings
+import asyncio
 import os
 
-import nest_asyncio
-nest_asyncio.apply()
 
 embeddings = BedrockEmbeddings(
     region_name="us-west-2"
@@ -30,10 +29,11 @@ def document_splitter(document):
     chunks = text_splitter.split_documents([document])
     return chunks
 
-def split_and_embed_document(document):
+async def split_and_embed_document(document):
     for page in document:
         page_chunks = document_splitter(page)
-        embeddings.aembed_documents(page_chunks) 
+        page_chunks_string = [page_chunks[i].page_content for i in range(len(page_chunks))]
+        await embeddings.aembed_documents(page_chunks_string) 
 
 
 def load_file(file_path):
@@ -44,10 +44,12 @@ def load_file(file_path):
 
 file_path_list = return_filelist("documents")
 
+async def main():
+    for file_path in file_path_list:
+        document = load_file(file_path)
+        await split_and_embed_document(document)
 
-for file_path in file_path_list:
-    document = load_file(file_path)
-    split_and_embed_document(document)
+asyncio.run(main())
 
 
 
