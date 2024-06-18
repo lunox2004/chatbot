@@ -3,3 +3,4 @@ chatbot-env/
 documents/
 ignored-files/
 .env
+database/

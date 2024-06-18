@@ -29,7 +29,7 @@ embeddings = BedrockEmbeddings(
     region_name="us-west-2"
 )
 
-database = Chroma(embedding_function=embeddings)
+database = Chroma(embedding_function=embeddings, persist_directory="./database")
 
 def return_filelist(path : str) -> list:
     file_list = []
@@ -59,28 +59,56 @@ def split_and_embed_document(document):
         page_chunks_id = database.add_documents(page_chunks)
 
 
-
 def load_file(file_path):
     loader = PyPDFLoader(file_path)
     document = loader.load()
     return document
 
+def find_and_add_file_names_to_filestore(file_names_storage, filename):
+    found = False
+    
+    try:
+        with open(file_names_storage, 'r+') as file:
+            lines = file.readlines()
+            for line in lines:
+                if filename in line:
+                    found = True
+                    break
 
+            if not found:
+                file.write(filename + '\n')
+        
+        return found
+
+    except FileNotFoundError:
+        with open(file_names_storage, 'w') as file:
+            file.write(filename + '\n')
+        return False
 
 async def main():
     file_path_list = return_filelist("documents")
     
     for file_path in file_path_list:
+        if(find_and_add_file_names_to_filestore("./database/file_name_store.txt",file_path)):
+            print(f"\n{file_path} already in database")
+            continue
+        
         documents = load_file(file_path)
         split_and_embed_document(documents)
+        print(f"\n{file_path} added to the database")
+    
 
+    while True:
+        query = input("\nEnter a query to search through the files(x to exit) : \n")
+        
+        if(query.upper() == "X"):
+            break
+        
+        retriever = database.as_retriever(search_type="mmr")
+        result = retriever.invoke(query)
+        print(f"\n{result[0].page_content}")
 
-
-    query = "What is the dress code policy?"
-    answer = database.similarity_search(query)
-    print(query)
-    print("\n\n")
-    print(answer)
+        
 
 asyncio.run(main())
 
