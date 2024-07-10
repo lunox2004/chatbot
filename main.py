@@ -5,11 +5,17 @@ from langchain_aws import ChatBedrock
 from langchain.chains import create_retrieval_chain
 from langchain.chains.combine_documents import create_stuff_documents_chain
 from langchain_core.prompts import ChatPromptTemplate
+from langchain_community.document_loaders import UnstructuredHTMLLoader
 from langchain_chroma import Chroma
 from dotenv import load_dotenv
+import time
+import streamlit as st
 import boto3
 import botocore
 import asyncio
+import fitz
+from PIL import Image
+import io
 import os
 
 load_dotenv()
@@ -60,8 +66,8 @@ def return_filelist(path : str) -> list:
 
 def document_splitter(document):
     text_splitter = RecursiveCharacterTextSplitter(
-        chunk_size = 2000,
-        chunk_overlap = 400,
+        chunk_size = 4000,
+        chunk_overlap = 800,
         length_function = len,
         is_separator_regex= False
     )
@@ -77,13 +83,32 @@ def split_and_embed_document(document):
         page_chunks_id = database.add_documents(page_chunks)
         print(page_chunks_id)
 
+def stream_generator(input):
+    for word in input.split():
+        yield word + " "
+        time.sleep(0.02)
+
 
 def load_file(file_path):
     loader = PyPDFLoader(file_path)
     document = loader.load()
     return document
 
-def find_and_add_file_names_to_filestore(file_names_storage, filename):
+def extract_pdf_page_as_image(pdf_path, page_number):
+    pdf_document = fitz.open(pdf_path)
+    page = pdf_document.load_page(page_number - 1)
+    pix = page.get_pixmap()
+    img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
+    
+    return img
+
+def extract_filename_without_extension(file_path):
+    filename_with_ext = os.path.basename(file_path)
+    filename, _ = os.path.splitext(filename_with_ext)
+    return filename
+
+
+def find_and_add_name_to_store(file_names_storage, filename):
     found = False
     
     try:
@@ -104,24 +129,22 @@ def find_and_add_file_names_to_filestore(file_names_storage, filename):
             file.write(filename + '\n')
         return False
 
-async def main():
-    file_path_list = return_filelist("documents")
-    
-    for file_path in file_path_list:
-        if(find_and_add_file_names_to_filestore("./database/file_name_store.txt",file_path)):
-            print(f"\n{file_path} already in database")
-            continue
-        
-        documents = load_file(file_path)
-        split_and_embed_document(documents)
-        print(f"\n{file_path} added to the database")  
-    
+def add_url(link):
+    if (find_and_add_name_to_store("./database/url_name_store.txt",link)):
+        print(f"\n{link} already in database")
+    else:
+        loader = UnstructuredHTMLLoader(link)
+        data = loader.load()
+        split_and_embed_document(data)
+        print(f"\n{link} has been uploaded to database")
+
+def make_retreiver_chain():
     retriever = database.as_retriever(search_type="mmr")
     system_prompt = (
-    "Use the given context to answer the question. "
-    "If you don't know the answer, say you don't know. "
-    "keep the answer concise. "
-    "Context: {context}"
+    """Your role is that of am human resource manager answering questions employees have about various policies and any queries related to the company,
+    keep the answer short and concise. 
+    If there is no context given just say \"there is no context given \" and nothing else
+    Context: {context}"""
     )
     prompt = ChatPromptTemplate.from_messages(
     [
@@ -131,16 +154,91 @@ async def main():
     )
     question_answer_chain = create_stuff_documents_chain(llm, prompt)
     chain = create_retrieval_chain(retriever, question_answer_chain)
+    return chain
+
+def clear_chat():
+    st.session_state.messages = []
+
+
+async def main():
+    uploaded_files = []
+    uploaded_url = ""
+    response = ""
+    file_path_list = return_filelist("documents")
+    save_location = "documents"
+    sidebar = st.sidebar
+    upload_type = sidebar.radio("Select file type to upload", ["pdf" , "websites"])
     
-    while True:
-        query = input("Enter the question(x to exit) : ")
-        if(query.upper() == "X"):
-            break
-        
-        print(chain.invoke({"input":query})["answer"])
+    if upload_type == "pdf":
+        uploaded_files = sidebar.file_uploader("Upload PDF files",key= 123, type=["pdf"], accept_multiple_files=True)
+    else:
+        uploaded_url = sidebar.text_input("enter url to upload")
+    
+    sidebar.button("clear chat", on_click=clear_chat)
 
+    if uploaded_files:
+        for uploaded_file in uploaded_files:
+            with open(os.path.join(save_location, uploaded_file.name), "wb") as f:
+                f.write(uploaded_file.getbuffer())
+            st.success(f"Saved {uploaded_file.name}")
 
+    for file_path in file_path_list:
+        if(find_and_add_name_to_store("./database/file_name_store.txt",file_path)):
+            print(f"\n{file_path} already in database")
+            continue
         
+        documents = load_file(file_path)
+        split_and_embed_document(documents)
+        print(f"\n{file_path} added to the database")  
+    
+    chain = make_retreiver_chain()
+    
+    if "messages" not in st.session_state:
+        st.session_state.messages = []
+
+    tab1 , tab2 = st.tabs(['chatbot','refererenced pdf pages'])
+    
+    with tab1:
+        for message in st.session_state.messages:
+            with st.chat_message(message["role"]):
+                if message["role"] == "user":
+                    st.markdown(message["content"])
+                else:
+                    if isinstance(message["content"], dict) and "answer" in message["content"]:
+                        st.markdown(message["content"]["answer"])
+                    else:
+                        st.markdown(message["content"]) 
+
+    with tab2:
+        if not st.session_state.messages:
+            st.write("nothing to display")
+        else:
+            last_message = st.session_state.messages[-1]
+            if last_message["role"] == "assistant" and isinstance(last_message["content"], dict) and "context" in last_message["content"]:
+                for page in last_message["content"]["context"]:
+                    with st.expander(extract_filename_without_extension(page.metadata["source"])):
+                        img = extract_pdf_page_as_image(page.metadata["source"], page.metadata["page"] + 1)
+                        img_byte_arr = io.BytesIO()
+                        img.save(img_byte_arr, format='PNG')
+                        img_byte_arr = img_byte_arr.getvalue()
+                        st.image(img_byte_arr)
+            else:
+                st.markdown("nothing to display")
+
+    if prompt := st.chat_input("Ask a question"):
+        st.chat_message("user").markdown(prompt)
+        st.session_state.messages.append({"role": "user", "content": prompt})
+
+        response = chain.invoke({"input": prompt})
+        if response.get("context"):
+            with st.chat_message("assistant"):
+                st.markdown(response["answer"])
+            st.session_state.messages.append({"role": "assistant", "content": response})
+        else:
+            st.markdown("No pdf's or urls given")
+    
+    print(response)
+
 
 asyncio.run(main())
 
